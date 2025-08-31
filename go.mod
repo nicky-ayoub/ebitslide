@@ -2,7 +2,10 @@ module github.com/nicky-ayoub/ebitslide
 
 go 1.24.6
 
-require github.com/hajimehoshi/ebiten/v2 v2.8.8
+require (
+	github.com/hajimehoshi/ebiten/v2 v2.8.8
+	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
+)
 
 require (
 	github.com/ebitengine/gomobile v0.0.0-20240911145611-4856209ac325 // indirect
