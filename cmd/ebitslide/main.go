@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"log"
 	"time"
 
@@ -18,10 +19,19 @@ type Game struct {
 	// currentIndex int // This is now managed by imageState
 	currentImagePath string // Track the path of the image in CurrentImage
 
-	imageState *ui.ImageState
+	imageState     *ui.ImageState
+	thumbnailStrip *ui.ThumbnailStrip
 
 	ScannerService   *service.ScannerService
+	ImageService     *service.ImageService
 	scanCompleteChan chan bool
+
+	// Viewport state for zoom and pan
+	zoom                       float64
+	panX, panY                 float64
+	isPanning                  bool
+	panStartX, panStartY       int
+	panStartPanX, panStartPanY float64
 }
 
 func (g *Game) Update() error {
@@ -63,8 +73,12 @@ func (g *Game) Update() error {
 		} else {
 			g.CurrentImage = img
 			g.currentImagePath = item.Path
+			g.resetViewToFitHeight() // Reset view when a new image is loaded
 		}
 	}
+
+	// --- Viewport (Zoom/Pan) and Navigation Input Handling ---
+	g.handleViewportInput()
 
 	// --- Input Handling ---
 	imageCount := g.imageState.GetCurrentImageCount()
@@ -89,7 +103,85 @@ func (g *Game) Update() error {
 		g.imageState.ToggleRandomMode(g.currentImagePath)
 	}
 
+	// Update the thumbnail strip and handle clicks
+	if g.thumbnailStrip != nil {
+		newIndex := g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
+		if newIndex != g.imageState.GetCurrentIndex() {
+			g.imageState.SetIndex(newIndex)
+		}
+	}
+
 	return nil
+}
+
+// handleViewportInput manages zoom, pan, and view reset controls.
+func (g *Game) handleViewportInput() {
+	// Reset view to actual size (1:1)
+	if inpututil.IsKeyJustPressed(ebiten.KeyO) {
+		g.resetViewActualSize()
+	}
+
+	// Reset view to fit screen height
+	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
+		g.resetViewToFitHeight()
+	}
+
+	// --- Zooming with mouse wheel ---
+	_, dy := ebiten.Wheel()
+	if dy != 0 {
+		mx, my := ebiten.CursorPosition()
+
+		// The point on the image under the cursor, before zoom
+		imageX := (float64(mx) - g.panX) / g.zoom
+		imageY := (float64(my) - g.panY) / g.zoom
+
+		// Apply zoom
+		zoomFactor := 1.1
+		if dy < 0 {
+			g.zoom /= zoomFactor
+		} else {
+			g.zoom *= zoomFactor
+		}
+
+		// Clamp zoom to reasonable limits
+		if g.zoom < 0.05 {
+			g.zoom = 0.05
+		}
+		if g.zoom > 20.0 {
+			g.zoom = 20.0
+		}
+
+		// Adjust pan so the point under the cursor stays in the same screen location
+		g.panX = float64(mx) - imageX*g.zoom
+		g.panY = float64(my) - imageY*g.zoom
+	}
+
+	// --- Panning with mouse drag ---
+	// Start panning
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		mx, my := ebiten.CursorPosition()
+		// Only start panning if the cursor is over the main image, not the thumbnail strip.
+		_, mainImageHeight := g.getMainImageScreenSize()
+		if my < mainImageHeight {
+			g.isPanning = true
+			g.panStartX, g.panStartY = mx, my
+			g.panStartPanX, g.panStartPanY = g.panX, g.panY
+		}
+	}
+
+	// Update panning
+	if g.isPanning {
+		if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+			mx, my := ebiten.CursorPosition()
+			dx := mx - g.panStartX
+			dy := my - g.panStartY
+			g.panX = g.panStartPanX + float64(dx)
+			g.panY = g.panStartPanY + float64(dy)
+		} else {
+			// Stop panning when the button is released
+			g.isPanning = false
+		}
+	}
 }
 
 // GetImageFullPath returns the full path of the currently displayed image.
@@ -98,32 +190,23 @@ func (g *Game) GetImageFullPath() string {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	// Reserve space for the thumbnail strip at the bottom
+	stripHeight := 0
+	if g.thumbnailStrip != nil {
+		stripHeight = g.thumbnailStrip.Height()
+	}
+	mainImageHeight := screen.Bounds().Dy() - stripHeight
+
+	// Create a sub-image for the main drawing area to avoid drawing over the strip area.
+	mainImageScreen := screen.SubImage(image.Rect(0, 0, screen.Bounds().Dx(), mainImageHeight)).(*ebiten.Image)
+
 	if g.CurrentImage != nil {
-		// Get logical screen and image dimensions.
-		screenWidth, screenHeight := screen.Size()
-		imageWidth, imageHeight := g.CurrentImage.Size()
-
-		// Calculate the scaling factor to fit the image within the screen while preserving aspect ratio.
-		// This is often called "letterboxing" or "pillarboxing".
-		scaleX := float64(screenWidth) / float64(imageWidth)
-		scaleY := float64(screenHeight) / float64(imageHeight)
-		scale := scaleX // Assume we scale by width.
-		if scaleY < scaleX {
-			scale = scaleY // If scaling by height is more restrictive, use that.
-		}
-
-		// Calculate the new dimensions of the scaled image.
-		scaledWidth := float64(imageWidth) * scale
-		scaledHeight := float64(imageHeight) * scale
-
-		// Calculate the top-left position to center the image on the screen.
-		x := (float64(screenWidth) - scaledWidth) / 2
-		y := (float64(screenHeight) - scaledHeight) / 2
-
 		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(scale, scale) // Apply scaling.
-		op.GeoM.Translate(x, y)     // Apply translation to center.
-		screen.DrawImage(g.CurrentImage, op)
+		// Apply the current zoom and pan state
+		op.GeoM.Scale(g.zoom, g.zoom)
+		op.GeoM.Translate(g.panX, g.panY)
+
+		mainImageScreen.DrawImage(g.CurrentImage, op)
 	} else {
 		ebitenutil.DebugPrint(screen, "No image to display or image failed to load.")
 	}
@@ -133,6 +216,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		modeStr = "Random"
 	}
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("Path: %s\nMode: %s\n%s", g.currentImagePath, modeStr, g.imageState.Dump()))
+
+	// Draw the thumbnail strip at the bottom
+	if g.thumbnailStrip != nil {
+		g.thumbnailStrip.Draw(screen)
+	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
@@ -142,11 +230,53 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeigh
 	return outsideWidth, outsideHeight
 }
 
+// getMainImageScreenSize is a helper to get the dimensions of the main drawing area.
+func (g *Game) getMainImageScreenSize() (int, int) {
+	stripHeight := 0
+	if g.thumbnailStrip != nil {
+		stripHeight = g.thumbnailStrip.Height()
+	}
+	w, h := ebiten.WindowSize()
+	return w, h - stripHeight
+}
+
+// resetViewToFitHeight calculates the zoom and pan to make the image fit the screen height.
+func (g *Game) resetViewToFitHeight() {
+	if g.CurrentImage == nil {
+		return
+	}
+
+	// Get dimensions
+	screenWidth, screenHeight := g.getMainImageScreenSize()
+	imageWidth, imageHeight := g.CurrentImage.Size()
+
+	// Calculate zoom
+	g.zoom = float64(screenHeight) / float64(imageHeight)
+
+	// Calculate pan to center horizontally
+	scaledWidth := float64(imageWidth) * g.zoom
+	g.panX = (float64(screenWidth) - scaledWidth) / 2
+	g.panY = 0 // Aligned to top
+}
+
+// resetViewActualSize sets zoom to 1:1 and centers the image.
+func (g *Game) resetViewActualSize() {
+	if g.CurrentImage == nil {
+		return
+	}
+	g.zoom = 1.0
+
+	screenWidth, screenHeight := g.getMainImageScreenSize()
+	imageWidth, imageHeight := g.CurrentImage.Size()
+	g.panX = (float64(screenWidth) - float64(imageWidth)) / 2
+	g.panY = (float64(screenHeight) - float64(imageHeight)) / 2
+}
+
 // initServices initializes the database and all backend services.
 func (g *Game) initServices() error {
 	fileScanner := scan.FileScannerImpl{}
 	g.ScannerService = service.NewScannerService(&fileScanner)
-	//g.ImageService = service.NewImageService()
+	g.ImageService = service.NewImageService()
 
 	return nil
 }
@@ -242,11 +372,13 @@ func (g *Game) runInitialScanAndWait(dir string) {
 }
 
 func main() {
-	ebiten.SetWindowSize(1920, 1080)
+	ebiten.SetWindowSize(1920, 980)
 	ebiten.SetWindowTitle("Hello, World!")
 	game := &Game{
 		imageState:       ui.NewImageState(),
 		scanCompleteChan: make(chan bool, 1),
+		zoom:             1.0, // Default zoom, will be reset on first image load
+		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
 		log.Fatalf("Failed to initialize services: %v", err)
@@ -254,6 +386,9 @@ func main() {
 
 	// Start initial scan and wait for it to complete or timeout
 	go game.runInitialScanAndWait(".")
+
+	// Initialize UI components that depend on services
+	game.thumbnailStrip = ui.NewThumbnailStrip(game.imageState, game.ImageService)
 
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
