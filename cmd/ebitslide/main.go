@@ -448,7 +448,7 @@ func (g *Game) runInitialScanAndWait(dir string) {
 			count = g.imageState.GetCurrentImageCount()
 		}
 		if count >= 100000 {
-			g.AddLogMessage(fmt.Sprint("Sufficient images found [%d]. Starting application...", count))
+			g.AddLogMessage(fmt.Sprintf("Sufficient images found [%d]. Starting application...", count))
 			return // Exit the wait loop
 		}
 	}
