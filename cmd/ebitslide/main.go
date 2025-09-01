@@ -33,6 +33,11 @@ type Game struct {
 	isPanning                  bool
 	panStartX, panStartY       int
 	panStartPanX, panStartPanY float64
+
+	// Slideshow state
+	slideshowActive   bool
+	slideshowInterval time.Duration
+	slideshowTimer    *time.Timer
 }
 
 func (g *Game) Update() error {
@@ -49,6 +54,22 @@ func (g *Game) Update() error {
 	// Toggle thumbnail strip visibility with 'T' key.
 	if inpututil.IsKeyJustPressed(ebiten.KeyT) {
 		g.thumbnailStripVisible = !g.thumbnailStripVisible
+	}
+
+	// Toggle slideshow mode with 'S' key.
+	if inpututil.IsKeyJustPressed(ebiten.KeyS) {
+		g.toggleSlideshow()
+	}
+
+	// If slideshow is active, check if the timer has fired.
+	if g.slideshowActive && g.slideshowTimer != nil {
+		select {
+		case <-g.slideshowTimer.C:
+			g.advanceImage()
+			g.slideshowTimer.Reset(g.slideshowInterval)
+		default:
+			// Timer has not fired yet.
+		}
 	}
 
 	// This is where game logic should go.
@@ -91,16 +112,13 @@ func (g *Game) Update() error {
 	if imageCount > 0 {
 		// Go to the next image (Right Arrow)
 		if inpututil.IsKeyJustPressed(ebiten.KeyRight) {
-			currentIndex := g.imageState.GetCurrentIndex()
-			nextIndex := (currentIndex + 1) % imageCount
-			g.imageState.SetIndex(nextIndex)
+			g.advanceImage()
+			g.resetSlideshowTimer()
 		}
 		// Go to the previous image (Left Arrow)
 		if inpututil.IsKeyJustPressed(ebiten.KeyLeft) {
-			currentIndex := g.imageState.GetCurrentIndex()
-			// Add imageCount to ensure the result is non-negative before the modulo.
-			prevIndex := (currentIndex - 1 + imageCount) % imageCount
-			g.imageState.SetIndex(prevIndex)
+			g.previousImage()
+			g.resetSlideshowTimer()
 		}
 	}
 
@@ -114,6 +132,7 @@ func (g *Game) Update() error {
 		newIndex := g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
 		if newIndex != g.imageState.GetCurrentIndex() {
 			g.imageState.SetIndex(newIndex)
+			g.resetSlideshowTimer()
 		}
 	}
 
@@ -190,6 +209,55 @@ func (g *Game) handleViewportInput() {
 	}
 }
 
+// advanceImage moves to the next image in the list, wrapping around.
+func (g *Game) advanceImage() {
+	imageCount := g.imageState.GetCurrentImageCount()
+	if imageCount > 0 {
+		currentIndex := g.imageState.GetCurrentIndex()
+		nextIndex := (currentIndex + 1) % imageCount
+		g.imageState.SetIndex(nextIndex)
+	}
+}
+
+// previousImage moves to the previous image in the list, wrapping around.
+func (g *Game) previousImage() {
+	imageCount := g.imageState.GetCurrentImageCount()
+	if imageCount > 0 {
+		currentIndex := g.imageState.GetCurrentIndex()
+		// Add imageCount to ensure the result is non-negative before the modulo.
+		prevIndex := (currentIndex - 1 + imageCount) % imageCount
+		g.imageState.SetIndex(prevIndex)
+	}
+}
+
+// resetSlideshowTimer resets the slideshow timer if slideshow mode is active.
+func (g *Game) resetSlideshowTimer() {
+	if g.slideshowActive && g.slideshowTimer != nil {
+		g.slideshowTimer.Reset(g.slideshowInterval)
+	}
+}
+
+// toggleSlideshow turns the slideshow mode on or off.
+func (g *Game) toggleSlideshow() {
+	g.slideshowActive = !g.slideshowActive
+
+	if g.slideshowActive {
+		// Just turned ON.
+		// If there's no timer, create one. Then reset it to start the countdown.
+		if g.slideshowTimer == nil {
+			g.slideshowTimer = time.NewTimer(g.slideshowInterval)
+		} else {
+			g.slideshowTimer.Reset(g.slideshowInterval)
+		}
+	} else {
+		// Just turned OFF.
+		// Stop the timer if it exists.
+		if g.slideshowTimer != nil {
+			g.slideshowTimer.Stop()
+		}
+	}
+}
+
 // GetImageFullPath returns the full path of the currently displayed image.
 func (g *Game) GetImageFullPath() string {
 	return g.currentImagePath
@@ -221,9 +289,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.imageState.IsRandom() {
 		modeStr = "Random"
 	}
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("Path: %s\nMode: %s\nIndex: %d\nCount: %d",
+	slideshowStr := ""
+	if g.slideshowActive {
+		slideshowStr = " (Slideshow ON)"
+	}
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("Path: %s\nMode: %s%s\nIndex: %d\nCount: %d",
 		g.currentImagePath,
 		modeStr,
+		slideshowStr,
 		g.imageState.GetCurrentIndex(),
 		g.imageState.GetCurrentImageCount()))
 
@@ -389,6 +462,8 @@ func main() {
 		scanCompleteChan:      make(chan bool, 1),
 		zoom:                  1.0, // Default zoom, will be reset on first image load
 		thumbnailStripVisible: true,
+		slideshowActive:       false,
+		slideshowInterval:     3 * time.Second,
 		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
