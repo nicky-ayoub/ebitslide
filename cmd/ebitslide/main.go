@@ -18,7 +18,10 @@ import (
 type Game struct {
 	CurrentImage *ebiten.Image
 	// currentIndex int // This is now managed by imageState
-	currentImagePath string // Track the path of the image in CurrentImage
+	currentImagePath    string // Track the path of the image in CurrentImage
+	loadingImagePath    string // Track the path of the image currently being loaded
+	mainImageJobChan    chan string
+	mainImageResultChan chan mainImageResult
 
 	imageState            *ui.ImageState
 	thumbnailStrip        *ui.ThumbnailStrip
@@ -39,6 +42,13 @@ type Game struct {
 	slideshowActive   bool
 	slideshowInterval time.Duration
 	slideshowTimer    *time.Timer
+}
+
+// mainImageResult holds the result of a background image loading operation.
+type mainImageResult struct {
+	img  *ebiten.Image
+	path string
+	err  error
 }
 
 // inputState holds the polled state of inputs for a single frame.
@@ -103,48 +113,67 @@ func (g *Game) Update() error {
 		g.toggleSlideshow()
 	}
 
-	// 3. Update game state (slideshow timer).
+	// 3. Update game state (slideshow timer)
 	if g.slideshowActive && g.slideshowTimer != nil {
 		select {
 		case <-g.slideshowTimer.C:
 			g.navigate(1)
 			g.slideshowTimer.Reset(g.slideshowInterval)
 		default:
-			// Timer has not fired.
+			// Timer has not fired
 		}
 	}
 
-	// 4. Update current image if it has changed. This is a critical state update.
+	// 4. Process results from the background image loader
+	select {
+	case result := <-g.mainImageResultChan:
+		// Only apply the result if it's for the image we are currently waiting for.
+		if result.path == g.loadingImagePath {
+			if result.err != nil {
+				log.Printf("Error loading image %s: %v", result.path, result.err)
+				g.CurrentImage = nil
+				g.currentImagePath = ""
+			} else {
+				g.CurrentImage = result.img
+				g.currentImagePath = result.path
+				g.resetViewToFitHeight()
+			}
+			g.loadingImagePath = "" // We're done loading.
+		} else if result.img != nil {
+			// This is a stale result for an image we no longer want. Deallocate it.
+			result.img.Deallocate()
+		}
+	default:
+		// No image loaded this frame.
+	}
+
+	// 5. Check for image changes and request a new image to be loaded
 	item := g.imageState.GetCurrentItem()
 	if item == nil {
-		// No item, so clear the current image
+		// No item selected, clear everything.
 		if g.CurrentImage != nil {
 			g.CurrentImage.Deallocate()
 			g.CurrentImage = nil
-			g.currentImagePath = ""
 		}
-		// No item to process, but we still need to handle input.
-	} else if item.Path != g.currentImagePath {
+		g.currentImagePath = ""
+		g.loadingImagePath = "" // Cancel any load in progress.
+	} else if item.Path != g.currentImagePath && item.Path != g.loadingImagePath {
+		// A new image needs to be loaded. Clear the current one.
 		if g.CurrentImage != nil {
 			g.CurrentImage.Deallocate()
+			g.CurrentImage = nil
 		}
+		g.currentImagePath = "" // Path is cleared until the new one is loaded.
 
-		img, _, err := ebitenutil.NewImageFromFile(item.Path)
-		if err != nil {
-			log.Printf("Error loading image %s: %v", item.Path, err)
-			g.CurrentImage = nil
-			g.currentImagePath = ""
-		} else {
-			g.CurrentImage = img
-			g.currentImagePath = item.Path
-			g.resetViewToFitHeight()
-		}
+		// Kick off the load.
+		g.loadingImagePath = item.Path
+		g.mainImageJobChan <- item.Path
 	}
 
-	// 5. Handle all state-dependent input (keyboard and mouse).
+	// 6. Handle all state-dependent input (keyboard and mouse).
 	g.handleStatefulInput(input)
 
-	// 6. Update UI components.
+	// 7. Update UI components.
 	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		newIndex := g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
 		if newIndex != g.imageState.GetCurrentIndex() {
@@ -305,8 +334,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		op.GeoM.Translate(g.panX, g.panY)
 
 		mainImageScreen.DrawImage(g.CurrentImage, op)
+	} else if g.loadingImagePath != "" {
+		ebitenutil.DebugPrint(screen, fmt.Sprintf("Loading: %s", g.loadingImagePath))
 	} else {
-		ebitenutil.DebugPrint(screen, "No image to display or image failed to load.")
+		ebitenutil.DebugPrint(screen, "No image selected or image failed to load.")
 	}
 	// Display debug info without spamming the console log
 	modeStr := "Sequential"
@@ -389,6 +420,19 @@ func (g *Game) initServices() error {
 }
 func (g *Game) AddLogMessage(msg string) {
 	fmt.Println(msg)
+}
+
+// mainImageLoader is a background worker that loads full-size images.
+func (g *Game) mainImageLoader() {
+	for path := range g.mainImageJobChan {
+		img, _, err := ebitenutil.NewImageFromFile(path)
+		// Send the result back to the main thread.
+		g.mainImageResultChan <- mainImageResult{
+			img:  img,
+			path: path,
+			err:  err,
+		}
+	}
 }
 
 // loadImages scans the given root directory for image files in a background goroutine
@@ -511,6 +555,8 @@ func main() {
 		thumbnailStripVisible: true,
 		slideshowActive:       startSlideshow,
 		slideshowInterval:     *slideshowInterval,
+		mainImageJobChan:      make(chan string, 1),
+		mainImageResultChan:   make(chan mainImageResult, 1),
 		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
@@ -521,6 +567,9 @@ func main() {
 	if game.slideshowActive {
 		game.slideshowTimer = time.NewTimer(game.slideshowInterval)
 	}
+
+	// Start the background worker for loading main images.
+	go game.mainImageLoader()
 
 	// Start initial scan and wait for it to complete or timeout
 	go game.runInitialScanAndWait(dirPath)
