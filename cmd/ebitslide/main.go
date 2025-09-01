@@ -22,6 +22,7 @@ type Game struct {
 	loadingImagePath    string // Track the path of the image currently being loaded
 	mainImageJobChan    chan string
 	mainImageResultChan chan mainImageResult
+	imageToDeallocate   *ebiten.Image
 
 	imageState            *ui.ImageState
 	thumbnailStrip        *ui.ThumbnailStrip
@@ -96,6 +97,13 @@ func (g *Game) pollInput() inputState {
 }
 
 func (g *Game) Update() error {
+	// Deallocate an image that was replaced in the previous frame.
+	// This is done at the start of the frame to ensure it's not in use by Draw.
+	if g.imageToDeallocate != nil {
+		g.imageToDeallocate.Deallocate()
+		g.imageToDeallocate = nil
+	}
+
 	// 1. Poll all keyboard input at the beginning of the frame.
 	input := g.pollInput()
 
@@ -131,16 +139,23 @@ func (g *Game) Update() error {
 		if result.path == g.loadingImagePath {
 			if result.err != nil {
 				log.Printf("Error loading image %s: %v", result.path, result.err)
+				if g.CurrentImage != nil {
+					g.imageToDeallocate = g.CurrentImage
+				}
 				g.CurrentImage = nil
 				g.currentImagePath = ""
 			} else {
+				// Swap the old image with the new one.
+				if g.CurrentImage != nil {
+					g.imageToDeallocate = g.CurrentImage // Mark old image for deallocation
+				}
 				g.CurrentImage = result.img
 				g.currentImagePath = result.path
 				g.resetViewToFitHeight()
 			}
 			g.loadingImagePath = "" // We're done loading.
 		} else if result.img != nil {
-			// This is a stale result for an image we no longer want. Deallocate it.
+			// This is a stale result for an image we no longer want. Deallocate it immediately.
 			result.img.Deallocate()
 		}
 	default:
@@ -150,22 +165,18 @@ func (g *Game) Update() error {
 	// 5. Check for image changes and request a new image to be loaded
 	item := g.imageState.GetCurrentItem()
 	if item == nil {
-		// No item selected, clear everything.
-		if g.CurrentImage != nil {
-			g.CurrentImage.Deallocate()
+		// No item selected, clear everything if there's something to clear.
+		if g.CurrentImage != nil || g.loadingImagePath != "" {
+			if g.CurrentImage != nil {
+				g.imageToDeallocate = g.CurrentImage
+			}
 			g.CurrentImage = nil
+			g.currentImagePath = ""
+			g.loadingImagePath = "" // Cancel any load in progress.
 		}
-		g.currentImagePath = ""
-		g.loadingImagePath = "" // Cancel any load in progress.
 	} else if item.Path != g.currentImagePath && item.Path != g.loadingImagePath {
-		// A new image needs to be loaded. Clear the current one.
-		if g.CurrentImage != nil {
-			g.CurrentImage.Deallocate()
-			g.CurrentImage = nil
-		}
-		g.currentImagePath = "" // Path is cleared until the new one is loaded.
-
-		// Kick off the load.
+		// A new image needs to be loaded. Keep the old image displayed while the new one loads.
+		// Just kick off the load. The result will be handled above.
 		g.loadingImagePath = item.Path
 		g.mainImageJobChan <- item.Path
 	}
@@ -557,6 +568,7 @@ func main() {
 		slideshowInterval:     *slideshowInterval,
 		mainImageJobChan:      make(chan string, 1),
 		mainImageResultChan:   make(chan mainImageResult, 1),
+		imageToDeallocate:     nil,
 		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
