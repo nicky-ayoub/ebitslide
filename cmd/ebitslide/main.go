@@ -306,6 +306,8 @@ func (g *Game) toggleSlideshow() {
 	g.slideshowActive = !g.slideshowActive
 
 	if g.slideshowActive {
+		// When slideshow is activated, hide the thumbnail strip for a cleaner view.
+		g.thumbnailStripVisible = false
 		// Just turned ON.
 		// If there's no timer, create one. Then reset it to start the countdown.
 		if g.slideshowTimer == nil {
@@ -564,7 +566,7 @@ func main() {
 		scanCompleteChan:      make(chan bool, 1),
 		zoom:                  1.0, // Default zoom, will be reset on first image load
 		thumbnailStripVisible: true,
-		slideshowActive:       startSlideshow,
+		slideshowActive:       false, // Will be activated by toggleSlideshow if needed.
 		slideshowInterval:     *slideshowInterval,
 		mainImageJobChan:      make(chan string, 1),
 		mainImageResultChan:   make(chan mainImageResult, 1),
@@ -575,9 +577,9 @@ func main() {
 		log.Fatalf("Failed to initialize services: %v", err)
 	}
 
-	// If starting in slideshow mode, initialize the timer.
-	if game.slideshowActive {
-		game.slideshowTimer = time.NewTimer(game.slideshowInterval)
+	// If starting in slideshow mode, toggle it on, which handles all related state.
+	if startSlideshow {
+		game.toggleSlideshow()
 	}
 
 	// Start the background worker for loading main images.
