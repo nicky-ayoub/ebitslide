@@ -18,6 +18,7 @@ const (
 	thumbSize          = 80
 	thumbSpacing       = 10
 	stripHeight        = thumbSize + 2*thumbSpacing
+	lookAheadAmount    = 10  // Number of thumbnails to preload on each side of the viewport
 	thumbnailCacheSize = 200 // Max number of thumbnails to keep in memory
 )
 
@@ -187,20 +188,32 @@ func (ts *ThumbnailStrip) Update(currentIndex int) int {
 		}
 	}
 
-	// 2. Determine which thumbnails are needed for the current view.
+	// 2. Determine which thumbnails are needed for the current view and for preloading.
+	// Get the visible items to identify which ones to prioritize in the cache.
 	viewportItems, _ := ts.imageState.GetViewportItems(currentIndex, viewportWidth)
-
-	// 3. Queue jobs for any missing thumbnails and mark visible ones as recently used.
+	visiblePaths := make(map[string]bool, len(viewportItems))
 	for _, vpItem := range viewportItems {
+		visiblePaths[vpItem.Item.Path] = true
+	}
+
+	// Get a larger set of items for loading, including the look-ahead.
+	totalItemsToConsider := viewportWidth + (2 * lookAheadAmount)
+	allItems, _ := ts.imageState.GetViewportItems(currentIndex, totalItemsToConsider)
+
+	// 3. Queue jobs for any missing thumbnails and mark visible ones as recently used in the cache.
+	for _, vpItem := range allItems {
 		path := vpItem.Item.Path
 
 		_, inCache := ts.thumbCache.Get(path)
 
 		if inCache {
-			ts.thumbCache.Touch(path) // Mark as used
-			continue
+			if visiblePaths[path] {
+				ts.thumbCache.Touch(path) // This is a visible item, keep it in cache.
+			}
+			continue // Already in cache, no need to load.
 		}
 
+		// Item is not in cache, so queue it for loading.
 		ts.pendingJobsMu.Lock()
 		_, isPending := ts.pendingJobs[path]
 		if !isPending {
@@ -209,14 +222,14 @@ func (ts *ThumbnailStrip) Update(currentIndex int) int {
 			case ts.jobQueue <- thumbnailJob{path: path}:
 			default:
 				// Job queue is full, we'll try again on the next frame.
-				// To avoid a lock-up, we must release the pendingJobs lock.
+				// To avoid a lock-up, we must release the pendingJobs lock before returning.
 				delete(ts.pendingJobs, path)
 			}
 		}
 		ts.pendingJobsMu.Unlock()
 	}
 
-	// 4. Handle Mouse Click
+	// 4. Handle Mouse Click (uses the original viewportItems)
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		if len(viewportItems) == 0 {
 			return currentIndex // No items to click
