@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"image"
 	"log"
@@ -455,6 +456,10 @@ func (g *Game) runInitialScanAndWait(dir string) {
 }
 
 func main() {
+	// Define command-line flags
+	slideshowInterval := flag.Duration("interval", 3*time.Second, "Slideshow interval duration (e.g., '5s', '1m')")
+	flag.Parse()
+
 	ebiten.SetWindowSize(1920, 980)
 	ebiten.SetWindowTitle("Hello, World!")
 	game := &Game{
@@ -463,7 +468,7 @@ func main() {
 		zoom:                  1.0, // Default zoom, will be reset on first image load
 		thumbnailStripVisible: true,
 		slideshowActive:       false,
-		slideshowInterval:     3 * time.Second,
+		slideshowInterval:     *slideshowInterval,
 		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
