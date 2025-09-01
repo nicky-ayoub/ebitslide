@@ -41,40 +41,80 @@ type Game struct {
 	slideshowTimer    *time.Timer
 }
 
+// inputState holds the polled state of inputs for a single frame.
+// This separates input polling from input handling logic.
+type inputState struct {
+	quit                bool
+	toggleFullscreen    bool
+	toggleThumbnails    bool
+	toggleSlideshow     bool
+	toggleRandom        bool
+	nextImage           bool
+	prevImage           bool
+	resetViewFitHeight  bool
+	resetViewActualSize bool
+
+	// Mouse state
+	wheelY         float64
+	panStart       bool // Left mouse button just pressed
+	panActive      bool // Left mouse button is being held down
+	mouseX, mouseY int
+}
+
+// pollInput gathers all raw input events for the current frame into an inputState struct.
+func (g *Game) pollInput() inputState {
+	_, wheelY := ebiten.Wheel()
+	mx, my := ebiten.CursorPosition()
+	return inputState{
+		quit:                inpututil.IsKeyJustPressed(ebiten.KeyQ) || inpututil.IsKeyJustPressed(ebiten.KeyEscape),
+		toggleFullscreen:    inpututil.IsKeyJustPressed(ebiten.KeyF11),
+		toggleThumbnails:    inpututil.IsKeyJustPressed(ebiten.KeyT),
+		toggleSlideshow:     inpututil.IsKeyJustPressed(ebiten.KeyS),
+		nextImage:           inpututil.IsKeyJustPressed(ebiten.KeyRight),
+		prevImage:           inpututil.IsKeyJustPressed(ebiten.KeyLeft),
+		toggleRandom:        inpututil.IsKeyJustPressed(ebiten.KeyR),
+		resetViewFitHeight:  inpututil.IsKeyJustPressed(ebiten.KeyF),
+		resetViewActualSize: inpututil.IsKeyJustPressed(ebiten.KeyO),
+
+		// Mouse state
+		wheelY:    wheelY,
+		panStart:  inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft),
+		panActive: ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft),
+		mouseX:    mx,
+		mouseY:    my,
+	}
+}
+
 func (g *Game) Update() error {
-	// Handle quit input first.
-	if inpututil.IsKeyJustPressed(ebiten.KeyQ) || inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+	// 1. Poll all keyboard input at the beginning of the frame.
+	input := g.pollInput()
+
+	// 2. Handle non-state-dependent inputs immediately.
+	if input.quit {
 		return ebiten.Termination
 	}
-
-	// Handle fullscreen toggle with F11 key.
-	if inpututil.IsKeyJustPressed(ebiten.KeyF11) {
+	if input.toggleFullscreen {
 		ebiten.SetFullscreen(!ebiten.IsFullscreen())
 	}
-
-	// Toggle thumbnail strip visibility with 'T' key.
-	if inpututil.IsKeyJustPressed(ebiten.KeyT) {
+	if input.toggleThumbnails {
 		g.thumbnailStripVisible = !g.thumbnailStripVisible
 	}
-
-	// Toggle slideshow mode with 'S' key.
-	if inpututil.IsKeyJustPressed(ebiten.KeyS) {
+	if input.toggleSlideshow {
 		g.toggleSlideshow()
 	}
 
-	// If slideshow is active, check if the timer has fired.
+	// 3. Update game state (slideshow timer).
 	if g.slideshowActive && g.slideshowTimer != nil {
 		select {
 		case <-g.slideshowTimer.C:
 			g.advanceImage()
 			g.slideshowTimer.Reset(g.slideshowInterval)
 		default:
-			// Timer has not fired yet.
+			// Timer has not fired.
 		}
 	}
 
-	// This is where game logic should go.
-	// We check if the image we should be displaying has changed.
+	// 4. Update current image if it has changed. This is a critical state update.
 	item := g.imageState.GetCurrentItem()
 	if item == nil {
 		// No item, so clear the current image
@@ -83,12 +123,8 @@ func (g *Game) Update() error {
 			g.CurrentImage = nil
 			g.currentImagePath = ""
 		}
-		return nil
-	}
-
-	// If the item's path is different from what we have loaded, load the new one.
-	if item.Path != g.currentImagePath {
-		// Deallocate previous image to free GPU memory
+		// No item to process, but we still need to handle input.
+	} else if item.Path != g.currentImagePath {
 		if g.CurrentImage != nil {
 			g.CurrentImage.Deallocate()
 		}
@@ -96,39 +132,19 @@ func (g *Game) Update() error {
 		img, _, err := ebitenutil.NewImageFromFile(item.Path)
 		if err != nil {
 			log.Printf("Error loading image %s: %v", item.Path, err)
-			g.CurrentImage = nil    // Clear image on error
-			g.currentImagePath = "" // Reset path
+			g.CurrentImage = nil
+			g.currentImagePath = ""
 		} else {
 			g.CurrentImage = img
 			g.currentImagePath = item.Path
-			g.resetViewToFitHeight() // Reset view when a new image is loaded
+			g.resetViewToFitHeight()
 		}
 	}
 
-	// --- Viewport (Zoom/Pan) and Navigation Input Handling ---
-	g.handleViewportInput()
+	// 5. Handle all state-dependent input (keyboard and mouse).
+	g.handleStatefulInput(input)
 
-	// --- Input Handling ---
-	imageCount := g.imageState.GetCurrentImageCount()
-	if imageCount > 0 {
-		// Go to the next image (Right Arrow)
-		if inpututil.IsKeyJustPressed(ebiten.KeyRight) {
-			g.advanceImage()
-			g.resetSlideshowTimer()
-		}
-		// Go to the previous image (Left Arrow)
-		if inpututil.IsKeyJustPressed(ebiten.KeyLeft) {
-			g.previousImage()
-			g.resetSlideshowTimer()
-		}
-	}
-
-	// Toggle random mode on/off with the 'R' key.
-	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.imageState.ToggleRandomMode(g.currentImagePath)
-	}
-
-	// Update the thumbnail strip and handle clicks
+	// 6. Update UI components.
 	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		newIndex := g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
 		if newIndex != g.imageState.GetCurrentIndex() {
@@ -140,67 +156,72 @@ func (g *Game) Update() error {
 	return nil
 }
 
-// handleViewportInput manages zoom, pan, and view reset controls.
-func (g *Game) handleViewportInput() {
-	// Reset view to actual size (1:1)
-	if inpututil.IsKeyJustPressed(ebiten.KeyO) {
+// handleStatefulInput manages all input that depends on the current game state,
+// such as the loaded image. It uses the pre-polled input state.
+func (g *Game) handleStatefulInput(input inputState) {
+	// --- Keyboard controls that depend on state ---
+	if input.resetViewActualSize {
 		g.resetViewActualSize()
 	}
-
-	// Reset view to fit screen height
-	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
+	if input.resetViewFitHeight {
 		g.resetViewToFitHeight()
 	}
 
-	// --- Zooming with mouse wheel ---
-	_, dy := ebiten.Wheel()
-	if dy != 0 {
-		mx, my := ebiten.CursorPosition()
+	imageCount := g.imageState.GetCurrentImageCount()
+	if imageCount > 0 {
+		if input.nextImage {
+			g.advanceImage()
+			g.resetSlideshowTimer()
+		}
+		if input.prevImage {
+			g.previousImage()
+			g.resetSlideshowTimer()
+		}
+	}
 
+	if input.toggleRandom {
+		g.imageState.ToggleRandomMode(g.currentImagePath)
+	}
+
+	// --- Zooming with mouse wheel ---
+	if input.wheelY != 0 {
 		// The point on the image under the cursor, before zoom
-		imageX := (float64(mx) - g.panX) / g.zoom
-		imageY := (float64(my) - g.panY) / g.zoom
+		imageX := (float64(input.mouseX) - g.panX) / g.zoom
+		imageY := (float64(input.mouseY) - g.panY) / g.zoom
 
 		// Apply zoom
 		zoomFactor := 1.1
-		if dy < 0 {
+		if input.wheelY < 0 {
 			g.zoom /= zoomFactor
 		} else {
 			g.zoom *= zoomFactor
 		}
 
 		// Clamp zoom to reasonable limits
-		if g.zoom < 0.05 {
-			g.zoom = 0.05
-		}
-		if g.zoom > 20.0 {
-			g.zoom = 20.0
-		}
+		g.zoom = clamp(g.zoom, 0.05, 20.0)
 
 		// Adjust pan so the point under the cursor stays in the same screen location
-		g.panX = float64(mx) - imageX*g.zoom
-		g.panY = float64(my) - imageY*g.zoom
+		g.panX = float64(input.mouseX) - imageX*g.zoom
+		g.panY = float64(input.mouseY) - imageY*g.zoom
 	}
 
 	// --- Panning with mouse drag ---
 	// Start panning
-	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		mx, my := ebiten.CursorPosition()
+	if input.panStart {
 		// Only start panning if the cursor is over the main image, not the thumbnail strip.
 		_, mainImageHeight := g.getMainImageScreenSize()
-		if my < mainImageHeight {
+		if input.mouseY < mainImageHeight {
 			g.isPanning = true
-			g.panStartX, g.panStartY = mx, my
+			g.panStartX, g.panStartY = input.mouseX, input.mouseY
 			g.panStartPanX, g.panStartPanY = g.panX, g.panY
 		}
 	}
 
 	// Update panning
 	if g.isPanning {
-		if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
-			mx, my := ebiten.CursorPosition()
-			dx := mx - g.panStartX
-			dy := my - g.panStartY
+		if input.panActive {
+			dx := input.mouseX - g.panStartX
+			dy := input.mouseY - g.panStartY
 			g.panX = g.panStartPanX + float64(dx)
 			g.panY = g.panStartPanY + float64(dy)
 		} else {
@@ -208,6 +229,17 @@ func (g *Game) handleViewportInput() {
 			g.isPanning = false
 		}
 	}
+}
+
+// clamp restricts a value to a given range.
+func clamp(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 // advanceImage moves to the next image in the list, wrapping around.
