@@ -10,6 +10,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
+	"github.com/nfnt/resize"
 	"github.com/nicky-ayoub/ebitslide/internal/service"
 )
 
@@ -161,6 +162,12 @@ func (ts *ThumbnailStrip) loader() {
 				continue // Cannot decode, skip.
 			}
 			img = decodedImg
+
+			// OPTIMIZATION: If the decoded image is large, resize it in the background
+			// before sending it to the main thread. This significantly reduces the
+			// workload for texture upload (NewImageFromImage).
+			// We resize to a size slightly larger than thumbSize to maintain quality.
+			img = resize.Thumbnail(thumbSize*2, thumbSize*2, img, resize.Lanczos3)
 		}
 
 		// Send the decoded standard image back to the main thread for processing.
