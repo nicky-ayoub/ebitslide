@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"container/list"
 	"image"
 	"image/color"
 	"os"
@@ -13,11 +14,75 @@ import (
 )
 
 const (
-	viewportWidth = 11 // Must be an odd number for a clear center
-	thumbSize     = 80
-	thumbSpacing  = 10
-	stripHeight   = thumbSize + 2*thumbSpacing
+	viewportWidth      = 11 // Must be an odd number for a clear center
+	thumbSize          = 80
+	thumbSpacing       = 10
+	stripHeight        = thumbSize + 2*thumbSpacing
+	thumbnailCacheSize = 200 // Max number of thumbnails to keep in memory
 )
+
+// lruEntry is the value stored in the LRU cache's linked list.
+type lruEntry struct {
+	key   string
+	value *ebiten.Image
+}
+
+// lruCache is a simple LRU cache for ebiten.Image thumbnails.
+// It is not thread-safe and is intended to be used only from the main game thread.
+type lruCache struct {
+	maxSize int
+	ll      *list.List
+	cache   map[string]*list.Element
+}
+
+// newLRUCache creates a new LRU cache.
+func newLRUCache(maxSize int) *lruCache {
+	return &lruCache{
+		maxSize: maxSize,
+		ll:      list.New(),
+		cache:   make(map[string]*list.Element),
+	}
+}
+
+// Put adds a value to the cache, evicting the least recently used item if full.
+func (c *lruCache) Put(key string, value *ebiten.Image) {
+	if elem, ok := c.cache[key]; ok {
+		// Key exists, update value and move to front.
+		c.ll.MoveToFront(elem)
+		elem.Value.(*lruEntry).value = value
+		return
+	}
+
+	// New key. Add to front.
+	elem := c.ll.PushFront(&lruEntry{key: key, value: value})
+	c.cache[key] = elem
+
+	// Evict if cache is over size.
+	if c.ll.Len() > c.maxSize {
+		elem := c.ll.Back()
+		if elem != nil {
+			c.ll.Remove(elem)
+			entry := elem.Value.(*lruEntry)
+			delete(c.cache, entry.key)
+			entry.value.Deallocate() // Free VRAM
+		}
+	}
+}
+
+// Get retrieves a value from the cache without changing its recency.
+func (c *lruCache) Get(key string) (*ebiten.Image, bool) {
+	if elem, ok := c.cache[key]; ok {
+		return elem.Value.(*lruEntry).value, true
+	}
+	return nil, false
+}
+
+// Touch marks an item as most recently used by moving it to the front of the list.
+func (c *lruCache) Touch(key string) {
+	if elem, ok := c.cache[key]; ok {
+		c.ll.MoveToFront(elem)
+	}
+}
 
 // thumbnailJob represents a request to load a thumbnail.
 type thumbnailJob struct {
@@ -35,11 +100,10 @@ type ThumbnailStrip struct {
 	imageState   *ImageState
 	imageService *service.ImageService
 
-	thumbCache    map[string]*ebiten.Image
+	thumbCache    *lruCache
 	pendingJobs   map[string]bool
 	jobQueue      chan thumbnailJob
 	resultQueue   chan thumbnailResult
-	cacheMu       sync.RWMutex
 	pendingJobsMu sync.Mutex
 
 	selectionBox *ebiten.Image
@@ -50,7 +114,7 @@ func NewThumbnailStrip(is *ImageState, ivs *service.ImageService) *ThumbnailStri
 	ts := &ThumbnailStrip{
 		imageState:   is,
 		imageService: ivs,
-		thumbCache:   make(map[string]*ebiten.Image),
+		thumbCache:   newLRUCache(thumbnailCacheSize),
 		pendingJobs:  make(map[string]bool),
 		jobQueue:     make(chan thumbnailJob, 50),
 		resultQueue:  make(chan thumbnailResult, 50),
@@ -113,9 +177,7 @@ func (ts *ThumbnailStrip) Update(currentIndex int) int {
 		select {
 		case result := <-ts.resultQueue:
 			ebitenImg := ebiten.NewImageFromImage(result.img)
-			ts.cacheMu.Lock()
-			ts.thumbCache[result.path] = ebitenImg
-			ts.cacheMu.Unlock()
+			ts.thumbCache.Put(result.path, ebitenImg)
 
 			ts.pendingJobsMu.Lock()
 			delete(ts.pendingJobs, result.path)
@@ -128,15 +190,14 @@ func (ts *ThumbnailStrip) Update(currentIndex int) int {
 	// 2. Determine which thumbnails are needed for the current view.
 	viewportItems, _ := ts.imageState.GetViewportItems(currentIndex, viewportWidth)
 
-	// 3. Queue jobs for any missing thumbnails.
+	// 3. Queue jobs for any missing thumbnails and mark visible ones as recently used.
 	for _, vpItem := range viewportItems {
 		path := vpItem.Item.Path
 
-		ts.cacheMu.RLock()
-		_, inCache := ts.thumbCache[path]
-		ts.cacheMu.RUnlock()
+		_, inCache := ts.thumbCache.Get(path)
 
 		if inCache {
+			ts.thumbCache.Touch(path) // Mark as used
 			continue
 		}
 
@@ -199,11 +260,8 @@ func (ts *ThumbnailStrip) Draw(screen *ebiten.Image) {
 	startX := (screenWidth - totalWidth) / 2
 	startY := screen.Bounds().Dy() - stripHeight + thumbSpacing
 
-	ts.cacheMu.RLock()
-	defer ts.cacheMu.RUnlock()
-
 	for i, vpItem := range viewportItems {
-		thumb, exists := ts.thumbCache[vpItem.Item.Path]
+		thumb, exists := ts.thumbCache.Get(vpItem.Item.Path)
 		if !exists {
 			continue // Don't draw if not loaded yet.
 		}
