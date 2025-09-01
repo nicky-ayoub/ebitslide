@@ -458,7 +458,22 @@ func (g *Game) runInitialScanAndWait(dir string) {
 func main() {
 	// Define command-line flags
 	slideshowInterval := flag.Duration("interval", 3*time.Second, "Slideshow interval duration (e.g., '5s', '1m')")
+	imageDirFlag := flag.String("dir", ".", "Directory to scan for images. Can also be provided as a positional argument.")
 	flag.Parse()
+
+	// Determine the directory to scan.
+	// Precedence: -dir flag > positional argument > default.
+	dirPath := *imageDirFlag
+	dirFlagIsSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "dir" {
+			dirFlagIsSet = true
+		}
+	})
+
+	if !dirFlagIsSet && flag.NArg() > 0 {
+		dirPath = flag.Arg(0)
+	}
 
 	ebiten.SetWindowSize(1920, 980)
 	ebiten.SetWindowTitle("Hello, World!")
@@ -476,7 +491,7 @@ func main() {
 	}
 
 	// Start initial scan and wait for it to complete or timeout
-	go game.runInitialScanAndWait(".")
+	go game.runInitialScanAndWait(dirPath)
 
 	// Initialize UI components that depend on services
 	game.thumbnailStrip = ui.NewThumbnailStrip(game.imageState, game.ImageService)
