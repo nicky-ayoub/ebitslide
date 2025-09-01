@@ -19,8 +19,9 @@ type Game struct {
 	// currentIndex int // This is now managed by imageState
 	currentImagePath string // Track the path of the image in CurrentImage
 
-	imageState     *ui.ImageState
-	thumbnailStrip *ui.ThumbnailStrip
+	imageState            *ui.ImageState
+	thumbnailStrip        *ui.ThumbnailStrip
+	thumbnailStripVisible bool
 
 	ScannerService   *service.ScannerService
 	ImageService     *service.ImageService
@@ -43,6 +44,11 @@ func (g *Game) Update() error {
 	// Handle fullscreen toggle with F11 key.
 	if inpututil.IsKeyJustPressed(ebiten.KeyF11) {
 		ebiten.SetFullscreen(!ebiten.IsFullscreen())
+	}
+
+	// Toggle thumbnail strip visibility with 'T' key.
+	if inpututil.IsKeyJustPressed(ebiten.KeyT) {
+		g.thumbnailStripVisible = !g.thumbnailStripVisible
 	}
 
 	// This is where game logic should go.
@@ -104,7 +110,7 @@ func (g *Game) Update() error {
 	}
 
 	// Update the thumbnail strip and handle clicks
-	if g.thumbnailStrip != nil {
+	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		newIndex := g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
 		if newIndex != g.imageState.GetCurrentIndex() {
 			g.imageState.SetIndex(newIndex)
@@ -192,7 +198,7 @@ func (g *Game) GetImageFullPath() string {
 func (g *Game) Draw(screen *ebiten.Image) {
 	// Reserve space for the thumbnail strip at the bottom
 	stripHeight := 0
-	if g.thumbnailStrip != nil {
+	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		stripHeight = g.thumbnailStrip.Height()
 	}
 	mainImageHeight := screen.Bounds().Dy() - stripHeight
@@ -218,7 +224,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("Path: %s\nMode: %s\n%s", g.currentImagePath, modeStr, g.imageState.Dump()))
 
 	// Draw the thumbnail strip at the bottom
-	if g.thumbnailStrip != nil {
+	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		g.thumbnailStrip.Draw(screen)
 	}
 }
@@ -233,7 +239,7 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeigh
 // getMainImageScreenSize is a helper to get the dimensions of the main drawing area.
 func (g *Game) getMainImageScreenSize() (int, int) {
 	stripHeight := 0
-	if g.thumbnailStrip != nil {
+	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		stripHeight = g.thumbnailStrip.Height()
 	}
 	w, h := ebiten.WindowSize()
@@ -375,9 +381,10 @@ func main() {
 	ebiten.SetWindowSize(1920, 980)
 	ebiten.SetWindowTitle("Hello, World!")
 	game := &Game{
-		imageState:       ui.NewImageState(),
-		scanCompleteChan: make(chan bool, 1),
-		zoom:             1.0, // Default zoom, will be reset on first image load
+		imageState:            ui.NewImageState(),
+		scanCompleteChan:      make(chan bool, 1),
+		zoom:                  1.0, // Default zoom, will be reset on first image load
+		thumbnailStripVisible: true,
 		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
