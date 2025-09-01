@@ -424,15 +424,8 @@ func (is *ImageState) GetViewportItems(centerIndex int, windowSize int) ([]Viewp
 }
 
 func (is *ImageState) Dump() string {
-	s := fmt.Sprintf("ImageState{isFiltered:%v, currentFilterTag:%q, random:%v, index:%d, images:%d items, filteredImages:%d items}",
-		is.isFiltered, is.currentFilterTag, is.random, is.index, len(is.images), len(is.filteredImages))
-
-	return s
-
-}
-
-func (is *ImageState) DumpData() string {
-	s := fmt.Sprintf("ImageState{\nimages:%v\nfilteredImages:%v\n}", is.images, is.filteredImages)
+	s := fmt.Sprintf("ImageState {\nRandom:%v\nIndex:%d\nImages:%d\n}",
+		is.random, is.index, len(is.images))
 
 	return s
 

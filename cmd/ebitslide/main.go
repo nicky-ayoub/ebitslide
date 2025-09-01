@@ -221,7 +221,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.imageState.IsRandom() {
 		modeStr = "Random"
 	}
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("Path: %s\nMode: %s\n%s", g.currentImagePath, modeStr, g.imageState.Dump()))
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("Path: %s\nMode: %s\nIndex: %d\nCount: %d",
+		g.currentImagePath,
+		modeStr,
+		g.imageState.GetCurrentIndex(),
+		g.imageState.GetCurrentImageCount()))
 
 	// Draw the thumbnail strip at the bottom
 	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
