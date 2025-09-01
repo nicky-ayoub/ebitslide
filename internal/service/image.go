@@ -32,34 +32,36 @@ func NewImageService() *ImageService {
 	return &ImageService{}
 }
 
-// GetImageInfo reads an image file, decodes it, and extracts metadata.
-func (is *ImageService) GetImageInfo(path string) (*ImageInfo, image.Image, error) {
+// GetImageInfo reads an image file and extracts metadata without decoding the full image,
+// which is significantly more performant.
+func (is *ImageService) GetImageInfo(path string) (*ImageInfo, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening file: %w", err)
+		return nil, fmt.Errorf("opening file: %w", err)
 	}
 	defer file.Close()
 
-	img, _, err := image.Decode(file)
+	// Efficiently get image dimensions without decoding the entire image.
+	config, _, err := image.DecodeConfig(file)
 	if err != nil {
-		return nil, nil, fmt.Errorf("decoding image: %w", err)
+		return nil, fmt.Errorf("decoding image config: %w", err)
 	}
 
 	// Reset file pointer to read EXIF data
 	if _, err := file.Seek(0, 0); err != nil {
-		return nil, nil, fmt.Errorf("seeking file for exif: %w", err)
+		return nil, fmt.Errorf("seeking file for exif: %w", err)
 	}
 
 	exifData, _ := exif.Decode(file) // Ignore error, EXIF might not be present
 
 	fileInfo, err := file.Stat()
 	if err != nil {
-		return nil, nil, fmt.Errorf("getting file stats: %w", err)
+		return nil, fmt.Errorf("getting file stats: %w", err)
 	}
 
 	info := &ImageInfo{
-		Width:    img.Bounds().Dx(),
-		Height:   img.Bounds().Dy(),
+		Width:    config.Width,
+		Height:   config.Height,
 		Size:     fileInfo.Size(),
 		ModTime:  fileInfo.ModTime(),
 		EXIFData: make(map[string]string),
@@ -80,7 +82,7 @@ func (is *ImageService) GetImageInfo(path string) (*ImageInfo, image.Image, erro
 		}
 	}
 
-	return info, img, nil
+	return info, nil
 }
 
 // GetEmbeddedThumbnail attempts to read an embedded EXIF thumbnail from an image file.
