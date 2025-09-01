@@ -461,16 +461,20 @@ func main() {
 	imageDirFlag := flag.String("dir", ".", "Directory to scan for images. Can also be provided as a positional argument.")
 	flag.Parse()
 
-	// Determine the directory to scan.
-	// Precedence: -dir flag > positional argument > default.
+	// Determine the directory to scan and if slideshow should start automatically.
 	dirPath := *imageDirFlag
 	dirFlagIsSet := false
+	startSlideshow := false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "dir" {
+		switch f.Name {
+		case "dir":
 			dirFlagIsSet = true
+		case "interval":
+			startSlideshow = true
 		}
 	})
 
+	// If -dir is not used, check for a positional argument.
 	if !dirFlagIsSet && flag.NArg() > 0 {
 		dirPath = flag.Arg(0)
 	}
@@ -482,12 +486,17 @@ func main() {
 		scanCompleteChan:      make(chan bool, 1),
 		zoom:                  1.0, // Default zoom, will be reset on first image load
 		thumbnailStripVisible: true,
-		slideshowActive:       false,
+		slideshowActive:       startSlideshow,
 		slideshowInterval:     *slideshowInterval,
 		// thumbnailStrip is initialized after services
 	}
 	if err := game.initServices(); err != nil {
 		log.Fatalf("Failed to initialize services: %v", err)
+	}
+
+	// If starting in slideshow mode, initialize the timer.
+	if game.slideshowActive {
+		game.slideshowTimer = time.NewTimer(game.slideshowInterval)
 	}
 
 	// Start initial scan and wait for it to complete or timeout
