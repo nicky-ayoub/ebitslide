@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"github.com/nfnt/resize"
 	"github.com/nicky-ayoub/ebitslide/internal/service"
@@ -175,10 +174,10 @@ func (ts *ThumbnailStrip) loader() {
 	}
 }
 
-// Update handles click events, processes loaded thumbnails, and queues new ones.
-// It returns the new view index if a thumbnail is clicked, otherwise it returns the provided currentIndex.
-func (ts *ThumbnailStrip) Update(currentIndex int) int {
-	// 1. Process any results that have come back from the loader goroutines.
+// Update processes loaded thumbnails from background workers and queues new ones
+// based on the current view. It no longer handles direct input.
+func (ts *ThumbnailStrip) Update(currentIndex int) {
+	// 1. Process results from loader goroutines.
 	// This must be done in the main thread as ebiten.Image creation is not thread-safe.
 	processing := true
 	for processing {
@@ -236,35 +235,41 @@ func (ts *ThumbnailStrip) Update(currentIndex int) int {
 		ts.pendingJobsMu.Unlock()
 	}
 
-	// 4. Handle Mouse Click (uses the original viewportItems)
-	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		if len(viewportItems) == 0 {
-			return currentIndex // No items to click
-		}
+	// Click handling is now done in the main game loop via HitTest.
+}
 
-		// Re-calculate geometry for hit detection
-		screenWidth, screenHeight := ebiten.WindowSize()
-		totalWidth := len(viewportItems)*(thumbSize+thumbSpacing) - thumbSpacing
-		startX := (screenWidth - totalWidth) / 2
-		startY := screenHeight - stripHeight + thumbSpacing
+// HitTest checks if a click occurred on a thumbnail and returns the view index of the clicked thumbnail.
+// It returns -1 if no thumbnail was clicked. This method is read-only and has no side effects.
+func (ts *ThumbnailStrip) HitTest(input InputState, currentIndex int) int {
+	// This check is redundant if called inside a `if input.LeftClickStart` block,
+	// but it makes the function safe to call anytime.
+	if !input.LeftClickStart {
+		return -1
+	}
 
-		mouseX, mouseY := ebiten.CursorPosition()
+	viewportItems, _ := ts.imageState.GetViewportItems(currentIndex, viewportWidth)
+	if len(viewportItems) == 0 {
+		return -1 // No items to click
+	}
 
-		for i, vpItem := range viewportItems {
-			thumbX := startX + i*(thumbSize+thumbSpacing)
-			thumbY := startY
+	// Re-calculate geometry for hit detection
+	screenWidth, screenHeight := ebiten.WindowSize()
+	totalWidth := len(viewportItems)*(thumbSize+thumbSpacing) - thumbSpacing
+	startX := (screenWidth - totalWidth) / 2
+	startY := screenHeight - stripHeight + thumbSpacing
 
-			// Check if mouse is within the bounds of this thumbnail slot
-			if mouseX >= thumbX && mouseX < thumbX+thumbSize &&
-				mouseY >= thumbY && mouseY < thumbY+thumbSize {
-				// Click detected on this thumbnail.
-				// The view index of this item is stored in vpItem.ViewIndex.
-				return vpItem.ViewIndex
-			}
+	for i, vpItem := range viewportItems {
+		thumbX := startX + i*(thumbSize+thumbSpacing)
+		thumbY := startY
+
+		// Check if mouse is within the bounds of this thumbnail slot
+		if input.MouseX >= thumbX && input.MouseX < thumbX+thumbSize &&
+			input.MouseY >= thumbY && input.MouseY < thumbY+thumbSize {
+			return vpItem.ViewIndex
 		}
 	}
 
-	return currentIndex // No click or click outside thumbnails, return original index
+	return -1 // No click on any thumbnail
 }
 
 // Draw renders the thumbnail strip onto the bottom of the screen.

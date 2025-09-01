@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"image/color"
 	"log"
 	"time"
 
@@ -43,6 +44,12 @@ type Game struct {
 	slideshowActive   bool
 	slideshowInterval time.Duration
 	slideshowTimer    *time.Timer
+
+	// For observing click intervals
+	lastClickTime time.Time
+
+	// For visual cue on exit
+	terminationTime time.Time
 }
 
 // mainImageResult holds the result of a background image loading operation.
@@ -52,73 +59,148 @@ type mainImageResult struct {
 	err  error
 }
 
-// inputState holds the polled state of inputs for a single frame.
-// This separates input polling from input handling logic.
-type inputState struct {
-	quit                bool
-	toggleFullscreen    bool
-	toggleThumbnails    bool
-	toggleSlideshow     bool
-	toggleRandom        bool
-	nextImage           bool
-	prevImage           bool
-	resetViewFitHeight  bool
-	resetViewActualSize bool
-
-	// Mouse state
-	wheelY         float64
-	panStart       bool // Left mouse button just pressed
-	panActive      bool // Left mouse button is being held down
-	mouseX, mouseY int
-}
-
 // pollInput gathers all raw input events for the current frame into an inputState struct.
-func (g *Game) pollInput() inputState {
+func (g *Game) pollInput() ui.InputState {
 	_, wheelY := ebiten.Wheel()
 	mx, my := ebiten.CursorPosition()
-	return inputState{
-		quit:                inpututil.IsKeyJustPressed(ebiten.KeyQ) || inpututil.IsKeyJustPressed(ebiten.KeyEscape),
-		toggleFullscreen:    inpututil.IsKeyJustPressed(ebiten.KeyF11),
-		toggleThumbnails:    inpututil.IsKeyJustPressed(ebiten.KeyT),
-		toggleSlideshow:     inpututil.IsKeyJustPressed(ebiten.KeyS),
-		nextImage:           inpututil.IsKeyJustPressed(ebiten.KeyRight),
-		prevImage:           inpututil.IsKeyJustPressed(ebiten.KeyLeft),
-		toggleRandom:        inpututil.IsKeyJustPressed(ebiten.KeyR),
-		resetViewFitHeight:  inpututil.IsKeyJustPressed(ebiten.KeyF),
-		resetViewActualSize: inpututil.IsKeyJustPressed(ebiten.KeyO),
+	return ui.InputState{
+		Quit:                inpututil.IsKeyJustPressed(ebiten.KeyQ) || inpututil.IsKeyJustPressed(ebiten.KeyEscape),
+		ToggleFullscreen:    inpututil.IsKeyJustPressed(ebiten.KeyF11),
+		ToggleThumbnails:    inpututil.IsKeyJustPressed(ebiten.KeyT),
+		ToggleSlideshow:     inpututil.IsKeyJustPressed(ebiten.KeyS),
+		NextImage:           inpututil.IsKeyJustPressed(ebiten.KeyRight),
+		PrevImage:           inpututil.IsKeyJustPressed(ebiten.KeyLeft),
+		ToggleRandom:        inpututil.IsKeyJustPressed(ebiten.KeyR),
+		ResetViewFitHeight:  inpututil.IsKeyJustPressed(ebiten.KeyF),
+		ResetViewActualSize: inpututil.IsKeyJustPressed(ebiten.KeyO),
 
 		// Mouse state
-		wheelY:    wheelY,
-		panStart:  inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft),
-		panActive: ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft),
-		mouseX:    mx,
-		mouseY:    my,
+		WheelY:          wheelY,
+		LeftClickStart:  inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft),
+		RightClickStart: inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight),
+		PanActive:       ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft),
+		MouseX:          mx,
+		MouseY:          my,
 	}
 }
 
 func (g *Game) Update() error {
-	// Deallocate an image that was replaced in the previous frame.
-	// This is done at the start of the frame to ensure it's not in use by Draw.
-	if g.imageToDeallocate != nil {
-		g.imageToDeallocate.Deallocate()
-		g.imageToDeallocate = nil
+	// If termination is scheduled, check if it's time to exit.
+	if !g.terminationTime.IsZero() {
+		if time.Now().After(g.terminationTime) {
+			return ebiten.Termination
+		}
+		// If it's not time yet, do nothing else for this frame.
+		// This ensures the flash is visible and no other actions occur.
+		return nil
 	}
 
 	// 1. Poll all keyboard input at the beginning of the frame.
 	input := g.pollInput()
 
-	// 2. Handle non-state-dependent inputs immediately.
-	if input.quit {
+	// 2. Handle all input intents, from highest to lowest priority.
+
+	// --- A. Immediate quit actions (highest priority) ---
+	if input.Quit {
 		return ebiten.Termination
 	}
-	if input.toggleFullscreen {
+	if input.RightClickStart {
+		log.Println("Right-click detected. Terminating.")
+		g.terminationTime = time.Now().Add(250 * time.Millisecond)
+		return nil // Stop all other updates to show the flash.
+	}
+
+	// --- B. Disambiguate Left Click ---
+	if input.LeftClickStart {
+		now := time.Now()
+		prevClickTime := g.lastClickTime
+		g.lastClickTime = now // Update time for next click
+
+		duration := time.Duration(0)
+		if !prevClickTime.IsZero() {
+			duration = now.Sub(prevClickTime)
+			log.Printf("Time between clicks: %v", duration)
+		}
+
+		// Check for thumbnail click first.
+		clickedThumbnailIndex := -1
+		if g.thumbnailStripVisible {
+			clickedThumbnailIndex = g.thumbnailStrip.HitTest(input, g.imageState.GetCurrentIndex())
+		}
+
+		// Now, decide what the click means based on priority.
+		if clickedThumbnailIndex != -1 {
+			// Priority 1: A click on a thumbnail.
+			g.imageState.SetIndex(clickedThumbnailIndex)
+			g.resetSlideshowTimer()
+		} else if duration > 0 && duration < 2*time.Second {
+			// Priority 2: A fast double-click on the main area.
+			log.Println("Fast double-click on main area detected. Terminating.")
+			g.terminationTime = time.Now().Add(250 * time.Millisecond)
+			return nil // Stop processing for flash
+		} else {
+			// Priority 3: Start a pan.
+			_, mainImageHeight := g.getMainImageScreenSize()
+			if input.MouseY < mainImageHeight {
+				g.isPanning = true
+				g.panStartX, g.panStartY = input.MouseX, input.MouseY
+				g.panStartPanX, g.panStartPanY = g.panX, g.panY
+			}
+		}
+	}
+
+	// --- C. Other non-state-dependent inputs ---
+	if input.ToggleFullscreen {
 		ebiten.SetFullscreen(!ebiten.IsFullscreen())
 	}
-	if input.toggleThumbnails {
+	if input.ToggleThumbnails {
 		g.thumbnailStripVisible = !g.thumbnailStripVisible
 	}
-	if input.toggleSlideshow {
+	if input.ToggleSlideshow {
 		g.toggleSlideshow()
+	}
+
+	// --- D. State-dependent inputs ---
+	if input.ResetViewActualSize {
+		g.resetViewActualSize()
+	}
+	if input.ResetViewFitHeight {
+		g.resetViewToFitHeight()
+	}
+	if g.imageState.GetCurrentImageCount() > 0 {
+		if input.NextImage {
+			g.navigate(1)
+			g.resetSlideshowTimer()
+		}
+		if input.PrevImage {
+			g.navigate(-1)
+			g.resetSlideshowTimer()
+		}
+	}
+	if input.ToggleRandom {
+		g.imageState.ToggleRandomMode(g.currentImagePath)
+	}
+
+	// --- E. Continuous inputs (panning, zooming) ---
+	if g.isPanning {
+		if input.PanActive {
+			dx := input.MouseX - g.panStartX
+			dy := input.MouseY - g.panStartY
+			g.panX = g.panStartPanX + float64(dx)
+			g.panY = g.panStartPanY + float64(dy)
+		} else {
+			g.isPanning = false
+		}
+	}
+	if input.WheelY != 0 {
+		g.handleZoom(input)
+	}
+
+	// Deallocate an image that was replaced in the previous frame.
+	// This is done at the start of the frame to ensure it's not in use by Draw.
+	if g.imageToDeallocate != nil {
+		g.imageToDeallocate.Deallocate()
+		g.imageToDeallocate = nil
 	}
 
 	// 3. Update game state (slideshow timer)
@@ -181,94 +263,34 @@ func (g *Game) Update() error {
 		g.mainImageJobChan <- item.Path
 	}
 
-	// 6. Handle all state-dependent input (keyboard and mouse).
-	g.handleStatefulInput(input)
-
-	// 7. Update UI components.
+	// 6. Update UI components.
 	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
-		newIndex := g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
-		if newIndex != g.imageState.GetCurrentIndex() {
-			g.imageState.SetIndex(newIndex)
-			g.resetSlideshowTimer()
-		}
+		g.thumbnailStrip.Update(g.imageState.GetCurrentIndex())
 	}
 
 	return nil
 }
 
-// handleStatefulInput manages all input that depends on the current game state,
-// such as the loaded image. It uses the pre-polled input state.
-func (g *Game) handleStatefulInput(input inputState) {
-	// --- Keyboard controls that depend on state ---
-	if input.resetViewActualSize {
-		g.resetViewActualSize()
-	}
-	if input.resetViewFitHeight {
-		g.resetViewToFitHeight()
-	}
+// handleZoom manages the zooming logic based on mouse wheel input.
+func (g *Game) handleZoom(input ui.InputState) {
+	// The point on the image under the cursor, before zoom
+	imageX := (float64(input.MouseX) - g.panX) / g.zoom
+	imageY := (float64(input.MouseY) - g.panY) / g.zoom
 
-	imageCount := g.imageState.GetCurrentImageCount()
-	if imageCount > 0 {
-		if input.nextImage {
-			g.navigate(1)
-			g.resetSlideshowTimer()
-		}
-		if input.prevImage {
-			g.navigate(-1)
-			g.resetSlideshowTimer()
-		}
+	// Apply zoom
+	zoomFactor := 1.1
+	if input.WheelY < 0 {
+		g.zoom /= zoomFactor
+	} else {
+		g.zoom *= zoomFactor
 	}
 
-	if input.toggleRandom {
-		g.imageState.ToggleRandomMode(g.currentImagePath)
-	}
+	// Clamp zoom to reasonable limits
+	g.zoom = clamp(g.zoom, 0.05, 20.0)
 
-	// --- Zooming with mouse wheel ---
-	if input.wheelY != 0 {
-		// The point on the image under the cursor, before zoom
-		imageX := (float64(input.mouseX) - g.panX) / g.zoom
-		imageY := (float64(input.mouseY) - g.panY) / g.zoom
-
-		// Apply zoom
-		zoomFactor := 1.1
-		if input.wheelY < 0 {
-			g.zoom /= zoomFactor
-		} else {
-			g.zoom *= zoomFactor
-		}
-
-		// Clamp zoom to reasonable limits
-		g.zoom = clamp(g.zoom, 0.05, 20.0)
-
-		// Adjust pan so the point under the cursor stays in the same screen location
-		g.panX = float64(input.mouseX) - imageX*g.zoom
-		g.panY = float64(input.mouseY) - imageY*g.zoom
-	}
-
-	// --- Panning with mouse drag ---
-	// Start panning
-	if input.panStart {
-		// Only start panning if the cursor is over the main image, not the thumbnail strip.
-		_, mainImageHeight := g.getMainImageScreenSize()
-		if input.mouseY < mainImageHeight {
-			g.isPanning = true
-			g.panStartX, g.panStartY = input.mouseX, input.mouseY
-			g.panStartPanX, g.panStartPanY = g.panX, g.panY
-		}
-	}
-
-	// Update panning
-	if g.isPanning {
-		if input.panActive {
-			dx := input.mouseX - g.panStartX
-			dy := input.mouseY - g.panStartY
-			g.panX = g.panStartPanX + float64(dx)
-			g.panY = g.panStartPanY + float64(dy)
-		} else {
-			// Stop panning when the button is released
-			g.isPanning = false
-		}
-	}
+	// Adjust pan so the point under the cursor stays in the same screen location
+	g.panX = float64(input.MouseX) - imageX*g.zoom
+	g.panY = float64(input.MouseY) - imageY*g.zoom
 }
 
 // clamp restricts a value to a given range.
@@ -324,10 +346,10 @@ func (g *Game) toggleSlideshow() {
 	}
 }
 
-// GetImageFullPath returns the full path of the currently displayed image.
-func (g *Game) GetImageFullPath() string {
-	return g.currentImagePath
-}
+// // GetImageFullPath returns the full path of the currently displayed image.
+// func (g *Game) GetImageFullPath() string {
+// 	return g.currentImagePath
+// }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	// Reserve space for the thumbnail strip at the bottom
@@ -372,6 +394,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.thumbnailStrip != nil && g.thumbnailStripVisible {
 		g.thumbnailStrip.Draw(screen)
 	}
+
+	// If termination is pending, draw a flash effect over the whole screen.
+	if !g.terminationTime.IsZero() {
+		// Draw a semi-transparent red overlay for the flash effect.
+		screen.Fill(color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0x80})
+	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
@@ -399,7 +427,7 @@ func (g *Game) resetViewToFitHeight() {
 
 	// Get dimensions
 	screenWidth, screenHeight := g.getMainImageScreenSize()
-	imageWidth, imageHeight := g.CurrentImage.Size()
+	imageWidth, imageHeight := g.CurrentImage.Bounds().Size().X, g.CurrentImage.Bounds().Size().Y
 
 	// Calculate zoom
 	g.zoom = float64(screenHeight) / float64(imageHeight)
@@ -418,7 +446,7 @@ func (g *Game) resetViewActualSize() {
 	g.zoom = 1.0
 
 	screenWidth, screenHeight := g.getMainImageScreenSize()
-	imageWidth, imageHeight := g.CurrentImage.Size()
+	imageWidth, imageHeight := g.CurrentImage.Bounds().Size().X, g.CurrentImage.Bounds().Size().Y
 	g.panX = (float64(screenWidth) - float64(imageWidth)) / 2
 	g.panY = (float64(screenHeight) - float64(imageHeight)) / 2
 }
