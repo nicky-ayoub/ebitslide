@@ -107,7 +107,7 @@ func (g *Game) Update() error {
 	if g.slideshowActive && g.slideshowTimer != nil {
 		select {
 		case <-g.slideshowTimer.C:
-			g.advanceImage()
+			g.navigate(1)
 			g.slideshowTimer.Reset(g.slideshowInterval)
 		default:
 			// Timer has not fired.
@@ -170,11 +170,11 @@ func (g *Game) handleStatefulInput(input inputState) {
 	imageCount := g.imageState.GetCurrentImageCount()
 	if imageCount > 0 {
 		if input.nextImage {
-			g.advanceImage()
+			g.navigate(1)
 			g.resetSlideshowTimer()
 		}
 		if input.prevImage {
-			g.previousImage()
+			g.navigate(-1)
 			g.resetSlideshowTimer()
 		}
 	}
@@ -242,24 +242,15 @@ func clamp(value, min, max float64) float64 {
 	return value
 }
 
-// advanceImage moves to the next image in the list, wrapping around.
-func (g *Game) advanceImage() {
+// navigate moves the view index by a given delta, wrapping around the list.
+// A positive delta moves forward, a negative delta moves backward.
+func (g *Game) navigate(delta int) {
 	imageCount := g.imageState.GetCurrentImageCount()
 	if imageCount > 0 {
 		currentIndex := g.imageState.GetCurrentIndex()
-		nextIndex := (currentIndex + 1) % imageCount
-		g.imageState.SetIndex(nextIndex)
-	}
-}
-
-// previousImage moves to the previous image in the list, wrapping around.
-func (g *Game) previousImage() {
-	imageCount := g.imageState.GetCurrentImageCount()
-	if imageCount > 0 {
-		currentIndex := g.imageState.GetCurrentIndex()
-		// Add imageCount to ensure the result is non-negative before the modulo.
-		prevIndex := (currentIndex - 1 + imageCount) % imageCount
-		g.imageState.SetIndex(prevIndex)
+		// The formula `(a % n + n) % n` handles negative numbers correctly for modular arithmetic.
+		newIndex := (currentIndex + delta%imageCount + imageCount) % imageCount
+		g.imageState.SetIndex(newIndex)
 	}
 }
 
